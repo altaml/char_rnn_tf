@@ -2,75 +2,306 @@ import tensorflow as tf
 import numpy as np
 import random
 
+'''
+  
+'''
 class hyperparameters():
     seq_size = 100
-    hidden_size = 128
-    batch_size = 1
-    data_file = 'data/shakespeare.txt'
-    num_epochs = 1
+    hidden_size = 512
+    batch_size = 100
+    data_file = 'warandpeace.txt'
+    num_epochs = 20
+    learn_rate = 2e-3
+    decay_rate = 0.97
+    keep_prob = 0.7
+    num_layers = 3
+    len_vocab = 0
+    ckpt_dir = './models/'
+    n_batches = 0
+    temp = 0.03
+    train = True
+    restart = True
 
-
-class input():
-    def __init__(self,config, data, name=None):
-        self.batch_size = batch_size = config.batch_size
-        self.seq_size = seq_size = config.seq_size
-        self.epoch_size = epoch_size = len(data) // (batch_size*seq_size)
-        self.input_data, self.targets = _batch_data(data, batch_size, seq_size)
-
-def get_batch(raw_data, batch_size, seq_size):
-    rand = [random.randint(0,n_batches) for i in range(batch_size)]
+def get_batch(raw_data, batch_size):
+    rand = [random.randint(0,len(raw_data)-1) for i in range(batch_size)]
     X = []
-    for b in range(n_batches):
-        X.append([])
-        for r in rand:
-            X[b].append([raw_data[i+r*batch_size] for i in range(seq_size)])
-    return X
+    Y = []
+    for r in rand:
+        X.append(raw_data[r][0])
+        Y.append(raw_data[r][1])
+    return X,Y
 
+def train_valid(raw_data, valid_size):
+    rand = [random.randint(0,len(raw_data)-1) for i in range(valid_size)]
+    train = []
+    valid = []
+    for i in range(len(raw_data)):
+        if i in rand:
+            valid.append(raw_data[i])
+        else:
+            train.append(raw_data[i])
+    return np.asarray(train),np.asarray(valid)
 
-if __name__ == "__main__":
-    print("open data file")
-    config = hyperparameters()
-
+def get_data(config):
     with open(config.data_file) as file:
         data = file.read()
 
     vocab = list(set(data))
+    config.len_vocab = len(vocab)
     char_to_idx = {char:i for i,char in enumerate(vocab)}
     idx_to_char = {i:char for i,char in enumerate(vocab)}
 
-    W_embed = tf.get_variable("word_embeddings", [len(vocab),config.hidden_size])
-
     x_input = [char_to_idx[i] for i in data]
-    labels = [char_to_idx[i] for i in data[1:]]
-    labels.append(char_to_idx[data[0]])
+    y_input = [char_to_idx[i] for i in data[1:]]
+    y_input.append(char_to_idx[data[0]])
  
     text_size = len(data)
 
-    sequences = []
     # break data into n sequences
-    for t_idx in range(text_size // seq_size):
-        sequences.append([x_input[t_idx*seq_size:(t_idx+1)*seq_size],
-            y_input[t_idx*seq_size:(t_idx+1)*seq_size]])
+    sequences = []
+    for t_idx in range(text_size // config.seq_size):
+        sequences.append([x_input[t_idx*config.seq_size:(t_idx+1)*config.seq_size],
+            y_input[t_idx*config.seq_size:(t_idx+1)*config.seq_size]])
 
-    n_batches = len(x_input) // (batch_size*seq_size)
-    for batch in range(n_batches):
+    train_set,valid_set = train_valid(sequences,int(0.05*len(sequences)))
+    config.n_batches = len(x_input) // (config.batch_size*config.seq_size)
+
+    return train_set,valid_set,char_to_idx,idx_to_char,vocab
+
+class model(object):
+    def __init__(self,config,is_training=True):
+        self.x = tf.placeholder(tf.int32,[config.batch_size, config.seq_size],name="x")
+        self.y_ = tf.placeholder(tf.int32,[config.batch_size, config.seq_size],name="y_")
+        self.kp = tf.placeholder(tf.float32,name="kp")
+        self.initial_state = tf.placeholder(tf.float32, 
+            [config.num_layers, 2, config.batch_size, config.hidden_size])
+
+        self.rnn_tuple_state = tuple(
+            [tf.nn.rnn_cell.LSTMStateTuple(self.initial_state[idx][0], self.initial_state[idx][1])
+            for idx in range(config.num_layers)])
+
+
+        with tf.variable_scope("embeddings",reuse=tf.AUTO_REUSE):
+            W_embed = tf.get_variable("word_embeddings", [config.len_vocab,config.hidden_size])
+        X = tf.nn.embedding_lookup(W_embed, self.x)
+        tf.summary.histogram("embeddings",W_embed)
+
+        if is_training:
+            X = tf.nn.dropout(X, self.kp)
+
+        cell = tf.nn.rnn_cell.BasicLSTMCell(config.hidden_size, state_is_tuple=True)
+
+        if is_training:
+            cell = tf.contrib.rnn.DropoutWrapper(cell,output_keep_prob=self.kp)
+
+        multi_rnn_cell = tf.nn.rnn_cell.MultiRNNCell([cell]*config.num_layers,state_is_tuple=True)
+
+        with tf.variable_scope("rnn",reuse=tf.AUTO_REUSE):
+            outputs, state = tf.nn.dynamic_rnn(
+                cell=multi_rnn_cell,
+                inputs=X,
+                dtype=tf.float32,
+                initial_state=self.rnn_tuple_state,
+                time_major=False)
+
+        self.final_state = state
+        outputs = tf.reshape(outputs, [-1, config.hidden_size])
+
+        with tf.variable_scope("softmax",reuse=tf.AUTO_REUSE): 
+            W = tf.get_variable("W_softmax",[config.hidden_size,config.len_vocab])
+            b = tf.get_variable("b_softmax",[config.len_vocab])
+        tf.summary.histogram("W_softmax",W)
+        tf.summary.histogram("b_softmax",b)
+
+        self.logits = tf.matmul(outputs,W) + b
+
+        self.probabilities = tf.nn.softmax(self.logits)
+
+        self.y_list = tf.reshape(self.y_,[-1])
+        self.y_list = tf.one_hot(indices=self.y_list,depth=len(vocab))
         
-        X = tf.nn.embedding_lookup(W_embed, x_batch)
+        correct_prediction = tf.equal(tf.argmax(self.y_list,1), tf.argmax(self.logits,1))
+        with tf.name_scope('accuracy'):
+            self.accuracy = tf.reduce_mean(tf.cast(correct_prediction,tf.float32))
+        tf.summary.scalar('accuracy',self.accuracy)
 
-        rnn_cell = tf.nn.rnn_cell.BasicRNNCell(config.hidden_size)
-        initial_state = rnn_cell.zero_state([config.batch_size],dtype=tf.float32)
-        outputs, state = tf.nn.dynamic_rnn(rnn_cell,X,initial_state=initial_state,dtype=tf.float32)
-     
-        with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
-            print(sess.run([outputs,state]))
+        with tf.name_scope('loss'):
+            self.cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+                labels=self.y_list,logits=self.logits))
+        tf.summary.scalar('loss',self.cross_entropy)
+
+        self.merged = tf.summary.merge_all()
+
+        self.saver = tf.train.Saver(tf.global_variables())
+
+        if not is_training:
+            return
+
+        trainable_vars = tf.trainable_variables()
+        grads, _ = tf.clip_by_global_norm(tf.gradients(self.cross_entropy, trainable_vars),
+            5.0)
+        optimizer = tf.train.AdamOptimizer(config.learn_rate)
+        self.train_optimizer = optimizer.apply_gradients(
+            zip(grads,trainable_vars))
+
+
+    def step(self, sess, batch_x, batch_y, init_state=None):
+        if init_state == None:
+            init_state = np.zeros((config.num_layers,2,config.batch_size,config.hidden_size))
+
+        input_feed = {self.x: batch_x,
+                      self.y_: batch_y,
+                      self.kp: config.keep_prob,        
+                      self.initial_state: init_state}
+
+        output_feed = [self.train_optimizer,
+                       self.cross_entropy,
+                       self.accuracy,
+                       self.final_state,
+                       self.merged]
+
+        outputs = sess.run(output_feed, input_feed)
+        return outputs[0], outputs[1], outputs[2], outputs[3], outputs[4]
+
+    def valid(self, sess, batch_x, batch_y, config, init_state=None):
+        if init_state == None:
+            init_state = np.zeros((config.num_layers,2,config.batch_size,config.hidden_size))
+
+        input_feed = {self.x: batch_x,
+                      self.y_: batch_y,
+                      self.kp: 1.0,
+                      self.initial_state: init_state}
+
+        output_feed = [self.cross_entropy,
+                       self.accuracy,
+                       self.probabilities]
+
+        outputs = sess.run(output_feed, input_feed)
+
+        return outputs[0], outputs[1], outputs[2]
+
+    def sample(self, sess, seed, config, sampling_type=1):
+        # Initialize model with seed
+        state = np.zeros((config.num_layers,2,config.batch_size,config.hidden_size))
+        # print(seed,end='')
+        for char_num, char in enumerate(seed[:-1]):
+            word = np.array(char_to_idx[char]).reshape(1,1)
+            input_feed = {self.x: word, self.kp: 1.0, self.initial_state: state}
+
+            state,tuple_state = sess.run([self.final_state,self.rnn_tuple_state], feed_dict=input_feed)
+
+        prev_char = seed[-1]
+        for word_num in range(0,500):
+            # print(idx_to_char[char_to_idx[prev_char]])
+            word = np.array(char_to_idx[prev_char]).reshape(1,1)
+            feed_dict = {self.x: word, self.kp: 1.0, self.initial_state: state}
+
+            probs, state, tuple_state = sess.run([self.probabilities,self.final_state,self.rnn_tuple_state],
+                feed_dict=feed_dict)
+
+            next_char_dist = probs[0]
+
+            next_char_dist /= config.temp
+            next_char_dist = np.exp(next_char_dist)
+            next_char_dist /= sum(next_char_dist)
+
+            if sampling_type != 0:
+                choice_index = np.argmax(next_char_dist)
+            else:
+                choice_index = -1
+                point = random.random()
+                weight = 0.0
+                for index in range(0,config.len_vocab):
+                    weight += next_char_dist[index]
+                    if weight >= point:
+                        choice_index = index
+                        break
+
+            seed = idx_to_char[choice_index]
+            prev_char = seed
+            print(seed,end='')
+        print('\n')
+
+def create_model(sess, config, is_training):
+
+    char_model = model(config,is_training)
+
+    ckpt = tf.train.get_checkpoint_state(config.ckpt_dir)
+
+    if config.restart:
+        ckpt = False
+    if ckpt and tf.train.checkpoint_exists(tf.train.latest_checkpoint(config.ckpt_dir)):
+        print("Restoring model:",tf.train.latest_checkpoint(config.ckpt_dir))
+        char_model.saver.restore(sess, tf.train.latest_checkpoint(config.ckpt_dir))
+    else:
+        sess.run(tf.global_variables_initializer())
+    return char_model
+
+def train(config,train_set,valid_set):
+    with tf.Session() as sess:
+        # training model
+        model = create_model(sess, config, True)
+        state = None
+
+        # validation model
+        valid_config = hyperparameters()
+        valid_config.batch_size = len(valid_set)
+        valid_config.len_vocab = config.len_vocab
+        valid_model = create_model(sess, valid_config, False)
+
+        # sample model
+        sample_config = hyperparameters()
+        sample_config.batch_size = 1
+        sample_config.seq_size = 1
+        sample_config.len_vocab = config.len_vocab
+        sample_model = create_model(sess, sample_config, False)
+        
+        train_writer = tf.summary.FileWriter('logs/train',sess.graph)
+
+        for batch in range(config.n_batches*config.num_epochs):
+            epoch = batch / config.n_batches
+            if epoch > 10 and batch % config.n_batches == 0:
+                config.learn_rate = config.learn_rate*config.decay_rate
+            print("\rRunning Batch: %s" % batch,end='')
+            batch_x, batch_y = get_batch(train_set,config.batch_size)
+            batch_x = np.array(batch_x)
+            batch_y = np.array(batch_y)
+
+            _,loss,acc,state,train_summary = model.step(sess, batch_x, batch_y, state)
+            train_writer.add_summary(train_summary,batch)
+
+            if batch % 100 == 0:
+                print("\rEpoch %.1f:\t\t\t\n\tTraining loss %.4f, Training Accuracy %.4f" % (epoch,loss,acc))
+                model.saver.save(sess, config.ckpt_dir+'model', global_step=batch,write_meta_graph=False)
+
+                loss,acc,probs = valid_model.valid(sess,valid_set[:,0],valid_set[:,1],valid_config)
+                print("\tValidate loss %.4f, Validate Accuracy %.4f" % (loss,acc))
+                print("**********************************************")
+                sample_model.sample(sess, '\n',sample_config, 0)
+                print("**********************************************")
+                
 
  
 
- # data should have the following structure:
- # text is broken up into n: seq_size list of chars
- # from the n lists, we randomly select batch_size entries
- # this makes 1 batch.
- # The next batch is again randomly selected from the same n lists
- # 1 epoch is when we have "statistically" sampled the full body of text
- # 1 epoch = len(text)//(batch_size*seq_size) batches 
+def sample(config):
+    with tf.Session() as sess:
+        model = create_model(sess, config, False)
+        config.batch_size = 1
+        config.seq_size = 1
+        config.len_vocab = 65
+        print(model.sample(sess, 'Thou ', config,1))
+        print(model.sample(sess, 'Thou ', config,0))
+ 
+
+if __name__ == "__main__":
+    print("open data file")
+    config = hyperparameters()
+    train_set,valid_set,char_to_idx,idx_to_char,vocab = get_data(config)
+
+    if config.train:
+        train(config,train_set,valid_set)
+    else:
+        with tf.device('/cpu:0'):
+            config.batch_size = 1
+            config.seq_size = 1
+            sample(config)
