@@ -6,15 +6,15 @@ import random
   
 '''
 class hyperparameters():
-    seq_size = 100
-    hidden_size = 512
-    batch_size = 100
-    data_file = 'warandpeace.txt'
+    seq_size = 50
+    hidden_size = 128
+    batch_size = 50
+    data_file = 'data/shakespeare.txt'
     num_epochs = 20
     learn_rate = 2e-3
     decay_rate = 0.97
-    keep_prob = 0.7
-    num_layers = 3
+    keep_prob = 1.0
+    num_layers = 2
     len_vocab = 0
     ckpt_dir = './models/'
     n_batches = 0
