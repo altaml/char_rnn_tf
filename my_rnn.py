@@ -54,9 +54,13 @@ def get_data(config):
     char_to_idx = {char:i for i,char in enumerate(vocab)}
     idx_to_char = {i:char for i,char in enumerate(vocab)}
 
-    # save vocab for later sampling
-    with open(config.vocab_file, 'wb') as output:
-        pickle.dump((vocab,char_to_idx,idx_to_char),output)
+    # save vocab for later sampling only if we dont have one we are using
+    if config.restart == True:
+        with open(config.vocab_file, 'wb') as output:
+            pickle.dump((vocab,char_to_idx,idx_to_char),output)
+    else:
+        with open(config.vocab_file, 'rb') as input_pkl:
+            vocab,char_to_idx,idx_to_char = pickle.load(input_pkl)
 
     x_input = [char_to_idx[i] for i in data]
     y_input = [char_to_idx[i] for i in data[1:]]
