@@ -6,10 +6,13 @@ Requires python3, tensorflow.
 Run using:
 $ python3 my_rnn.py
 
-Currently sampling can only be done while it is running.
-A sample is created every 100 batches.
+To turn on sampling, edit the lines in my_rnn.py:
+train = True => train = False
+restart = True => restart = False
+
+The model must be trained first so that there is a checkpoint to load.
 
 TODO:
- - Figure out how to do sampling from saved model.
+ - Add command line flags for sampling, temperature etc.
  - package model for integration into AltaML website.
  
