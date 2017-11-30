@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import random
+import pickle
 
 '''
   
@@ -10,17 +11,18 @@ class hyperparameters():
     hidden_size = 128
     batch_size = 50
     data_file = 'data/shakespeare.txt'
-    num_epochs = 20
+    vocab_file = 'data/vocab.pkl'
+    num_epochs = 50
     learn_rate = 2e-3
-    decay_rate = 0.97
-    keep_prob = 1.0
+    decay_rate = 0.99
+    keep_prob = 0.9
     num_layers = 2
     len_vocab = 0
     ckpt_dir = './models/'
     n_batches = 0
-    temp = 0.03
-    train = True
-    restart = True
+    temp = 0.025
+    train = False
+    restart = False
 
 def get_batch(raw_data, batch_size):
     rand = [random.randint(0,len(raw_data)-1) for i in range(batch_size)]
@@ -47,9 +49,14 @@ def get_data(config):
         data = file.read()
 
     vocab = list(set(data))
+
     config.len_vocab = len(vocab)
     char_to_idx = {char:i for i,char in enumerate(vocab)}
     idx_to_char = {i:char for i,char in enumerate(vocab)}
+
+    # save vocab for later sampling
+    with open(config.vocab_file, 'wb') as output:
+        pickle.dump((vocab,char_to_idx,idx_to_char),output)
 
     x_input = [char_to_idx[i] for i in data]
     y_input = [char_to_idx[i] for i in data[1:]]
@@ -108,12 +115,12 @@ class model(object):
         outputs = tf.reshape(outputs, [-1, config.hidden_size])
 
         with tf.variable_scope("softmax",reuse=tf.AUTO_REUSE): 
-            W = tf.get_variable("W_softmax",[config.hidden_size,config.len_vocab])
-            b = tf.get_variable("b_softmax",[config.len_vocab])
-        tf.summary.histogram("W_softmax",W)
-        tf.summary.histogram("b_softmax",b)
+            self.W = tf.get_variable("W_softmax",[config.hidden_size,config.len_vocab])
+            self.b = tf.get_variable("b_softmax",[config.len_vocab])
+        tf.summary.histogram("W_softmax",self.W)
+        tf.summary.histogram("b_softmax",self.b)
 
-        self.logits = tf.matmul(outputs,W) + b
+        self.logits = tf.matmul(outputs,self.W) + self.b
 
         self.probabilities = tf.nn.softmax(self.logits)
 
@@ -158,10 +165,11 @@ class model(object):
                        self.cross_entropy,
                        self.accuracy,
                        self.final_state,
-                       self.merged]
+                       self.merged,
+                       self.W]
 
         outputs = sess.run(output_feed, input_feed)
-        return outputs[0], outputs[1], outputs[2], outputs[3], outputs[4]
+        return outputs[0], outputs[1], outputs[2], outputs[3], outputs[4], outputs[5]
 
     def valid(self, sess, batch_x, batch_y, config, init_state=None):
         if init_state == None:
@@ -188,15 +196,17 @@ class model(object):
             word = np.array(char_to_idx[char]).reshape(1,1)
             input_feed = {self.x: word, self.kp: 1.0, self.initial_state: state}
 
-            state,tuple_state = sess.run([self.final_state,self.rnn_tuple_state], feed_dict=input_feed)
+            state,tuple_state,W = sess.run([self.final_state,self.rnn_tuple_state,self.W], feed_dict=input_feed)
+            if(char_num == 0):
+                print("Initial W is:\n",W)
 
         prev_char = seed[-1]
-        for word_num in range(0,500):
+        for word_num in range(0,1000):
             # print(idx_to_char[char_to_idx[prev_char]])
             word = np.array(char_to_idx[prev_char]).reshape(1,1)
             feed_dict = {self.x: word, self.kp: 1.0, self.initial_state: state}
 
-            probs, state, tuple_state = sess.run([self.probabilities,self.final_state,self.rnn_tuple_state],
+            probs, state, tuple_state,W= sess.run([self.probabilities,self.final_state,self.rnn_tuple_state,self.W],
                 feed_dict=feed_dict)
 
             next_char_dist = probs[0]
@@ -221,6 +231,7 @@ class model(object):
             prev_char = seed
             print(seed,end='')
         print('\n')
+        return W
 
 def create_model(sess, config, is_training):
 
@@ -258,7 +269,7 @@ def train(config,train_set,valid_set):
         
         train_writer = tf.summary.FileWriter('logs/train',sess.graph)
 
-        for batch in range(config.n_batches*config.num_epochs):
+        for batch in range(config.n_batches*config.num_epochs+1):
             epoch = batch / config.n_batches
             if epoch > 10 and batch % config.n_batches == 0:
                 config.learn_rate = config.learn_rate*config.decay_rate
@@ -267,19 +278,20 @@ def train(config,train_set,valid_set):
             batch_x = np.array(batch_x)
             batch_y = np.array(batch_y)
 
-            _,loss,acc,state,train_summary = model.step(sess, batch_x, batch_y, state)
+            _,loss,acc,state,train_summary, W = model.step(sess, batch_x, batch_y, state)
             train_writer.add_summary(train_summary,batch)
 
-            if batch % 100 == 0:
-                print("\rEpoch %.1f:\t\t\t\n\tTraining loss %.4f, Training Accuracy %.4f" % (epoch,loss,acc))
-                model.saver.save(sess, config.ckpt_dir+'model', global_step=batch,write_meta_graph=False)
+            if batch % 100 == 0 or epoch == config.num_epochs:
+                print("\nEpoch %.1f:      \n\tTraining loss %.4f, Training Accuracy %.4f" % (epoch,loss,acc))
+                model.saver.save(sess, config.ckpt_dir+'model', global_step=batch,write_meta_graph=True)
 
                 loss,acc,probs = valid_model.valid(sess,valid_set[:,0],valid_set[:,1],valid_config)
                 print("\tValidate loss %.4f, Validate Accuracy %.4f" % (loss,acc))
                 print("**********************************************")
-                sample_model.sample(sess, '\n',sample_config, 0)
+                W = sample_model.sample(sess, '\n',sample_config, 0)
                 print("**********************************************")
-                
+            if epoch == config.num_epochs:
+                print("Final trained W is:\n", W)
 
  
 
@@ -289,19 +301,23 @@ def sample(config):
         config.batch_size = 1
         config.seq_size = 1
         config.len_vocab = 65
-        print(model.sample(sess, 'Thou ', config,1))
-        print(model.sample(sess, 'Thou ', config,0))
+        model.sample(sess, '\n', config,0)
+        
  
 
 if __name__ == "__main__":
     print("open data file")
     config = hyperparameters()
-    train_set,valid_set,char_to_idx,idx_to_char,vocab = get_data(config)
 
     if config.train:
+        train_set,valid_set,char_to_idx,idx_to_char,vocab = get_data(config)
         train(config,train_set,valid_set)
     else:
         with tf.device('/cpu:0'):
+
+            with open(config.vocab_file, 'rb') as pkl_file:
+                vocab,char_to_idx,idx_to_char = pickle.load(pkl_file)
             config.batch_size = 1
             config.seq_size = 1
+            config.len_vocab = len(vocab)
             sample(config)
