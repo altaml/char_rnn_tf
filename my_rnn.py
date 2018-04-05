@@ -2,15 +2,22 @@ import tensorflow as tf
 import numpy as np
 import random
 import pickle
+import os
+
+# Turns off a bunch of GPU info messages
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 '''
-  
+A classic example of a character based RNN that learns to write in the style
+of the text that it is fed.
+For this example, I downloaded all Wikipedia pages related to Machine Learning.
 '''
+
 class hyperparameters():
-    seq_size = 50
-    hidden_size = 128
+    seq_size = 150
+    hidden_size = 256
     batch_size = 50
-    data_file = 'data/shakespeare.txt'
+    data_file = 'data/machine_learning_wiki_clean.xml'
     vocab_file = 'data/vocab.pkl'
     num_epochs = 50
     learn_rate = 2e-3
@@ -20,9 +27,9 @@ class hyperparameters():
     len_vocab = 0
     ckpt_dir = './models/'
     n_batches = 0
-    temp = 0.025
-    train = False
-    restart = False
+    temp = 0.04
+    train = True
+    restart = True
 
 def get_batch(raw_data, batch_size):
     rand = [random.randint(0,len(raw_data)-1) for i in range(batch_size)]
@@ -45,10 +52,17 @@ def train_valid(raw_data, valid_size):
     return np.asarray(train),np.asarray(valid)
 
 def get_data(config):
-    with open(config.data_file) as file:
+    with open(config.data_file, 'r') as file:
         data = file.read()
 
     vocab = list(set(data))
+    vocab.sort()
+    # We only want english language characters
+    # If we don't do this, the vocabulary becomes prohibitively large
+    # when running on a smaller computer
+    strip_chars = vocab[97:]
+    vocab = vocab[0:97]
+    print(vocab)
 
     config.len_vocab = len(vocab)
     char_to_idx = {char:i for i,char in enumerate(vocab)}
@@ -62,10 +76,13 @@ def get_data(config):
         with open(config.vocab_file, 'rb') as input_pkl:
             vocab,char_to_idx,idx_to_char = pickle.load(input_pkl)
 
+    for character in strip_chars:
+        data = data.replace(character, '')
+
     x_input = [char_to_idx[i] for i in data]
     y_input = [char_to_idx[i] for i in data[1:]]
     y_input.append(char_to_idx[data[0]])
- 
+    # print(x_input)
     text_size = len(data)
 
     # break data into n sequences
@@ -83,14 +100,15 @@ class model(object):
     def __init__(self,config,is_training=True):
         self.x = tf.placeholder(tf.int32,[config.batch_size, config.seq_size],name="x")
         self.y_ = tf.placeholder(tf.int32,[config.batch_size, config.seq_size],name="y_")
+        # keep probability for dropout
         self.kp = tf.placeholder(tf.float32,name="kp")
-        self.initial_state = tf.placeholder(tf.float32, 
+        self.initial_state = tf.placeholder(tf.float32,
             [config.num_layers, 2, config.batch_size, config.hidden_size])
 
+        # create RNN-LSTM cell tuple
         self.rnn_tuple_state = tuple(
             [tf.nn.rnn_cell.LSTMStateTuple(self.initial_state[idx][0], self.initial_state[idx][1])
             for idx in range(config.num_layers)])
-
 
         with tf.variable_scope("embeddings",reuse=tf.AUTO_REUSE):
             W_embed = tf.get_variable("word_embeddings", [config.len_vocab,config.hidden_size])
@@ -118,7 +136,7 @@ class model(object):
         self.final_state = state
         outputs = tf.reshape(outputs, [-1, config.hidden_size])
 
-        with tf.variable_scope("softmax",reuse=tf.AUTO_REUSE): 
+        with tf.variable_scope("softmax",reuse=tf.AUTO_REUSE):
             self.W = tf.get_variable("W_softmax",[config.hidden_size,config.len_vocab])
             self.b = tf.get_variable("b_softmax",[config.len_vocab])
         tf.summary.histogram("W_softmax",self.W)
@@ -130,7 +148,7 @@ class model(object):
 
         self.y_list = tf.reshape(self.y_,[-1])
         self.y_list = tf.one_hot(indices=self.y_list,depth=len(vocab))
-        
+
         correct_prediction = tf.equal(tf.argmax(self.y_list,1), tf.argmax(self.logits,1))
         with tf.name_scope('accuracy'):
             self.accuracy = tf.reduce_mean(tf.cast(correct_prediction,tf.float32))
@@ -162,7 +180,7 @@ class model(object):
 
         input_feed = {self.x: batch_x,
                       self.y_: batch_y,
-                      self.kp: config.keep_prob,        
+                      self.kp: config.keep_prob,
                       self.initial_state: init_state}
 
         output_feed = [self.train_optimizer,
@@ -176,6 +194,9 @@ class model(object):
         return outputs[0], outputs[1], outputs[2], outputs[3], outputs[4], outputs[5]
 
     def valid(self, sess, batch_x, batch_y, config, init_state=None):
+        '''
+        Validation input and output feeds
+        '''
         if init_state == None:
             init_state = np.zeros((config.num_layers,2,config.batch_size,config.hidden_size))
 
@@ -193,19 +214,22 @@ class model(object):
         return outputs[0], outputs[1], outputs[2]
 
     def sample(self, sess, seed, config, sampling_type=1):
+        '''
+        Function to generate sample of text
+        '''
         # Initialize model with seed
         state = np.zeros((config.num_layers,2,config.batch_size,config.hidden_size))
-        # print(seed,end='')
+        print(seed,end='')
         for char_num, char in enumerate(seed[:-1]):
             word = np.array(char_to_idx[char]).reshape(1,1)
             input_feed = {self.x: word, self.kp: 1.0, self.initial_state: state}
 
             state,tuple_state,W = sess.run([self.final_state,self.rnn_tuple_state,self.W], feed_dict=input_feed)
-            if(char_num == 0):
-                print("Initial W is:\n",W)
+            # if(char_num == 0):
+            #     print("Initial W is:\n",W)
 
         prev_char = seed[-1]
-        for word_num in range(0,1000):
+        for word_num in range(0,100):
             # print(idx_to_char[char_to_idx[prev_char]])
             word = np.array(char_to_idx[prev_char]).reshape(1,1)
             feed_dict = {self.x: word, self.kp: 1.0, self.initial_state: state}
@@ -230,7 +254,6 @@ class model(object):
                     if weight >= point:
                         choice_index = index
                         break
-
             seed = idx_to_char[choice_index]
             prev_char = seed
             print(seed,end='')
@@ -270,7 +293,7 @@ def train(config,train_set,valid_set):
         sample_config.seq_size = 1
         sample_config.len_vocab = config.len_vocab
         sample_model = create_model(sess, sample_config, False)
-        
+
         train_writer = tf.summary.FileWriter('logs/train',sess.graph)
 
         for batch in range(config.n_batches*config.num_epochs+1):
@@ -292,25 +315,25 @@ def train(config,train_set,valid_set):
                 loss,acc,probs = valid_model.valid(sess,valid_set[:,0],valid_set[:,1],valid_config)
                 print("\tValidate loss %.4f, Validate Accuracy %.4f" % (loss,acc))
                 print("**********************************************")
-                W = sample_model.sample(sess, '\n',sample_config, 0)
+                W = sample_model.sample(sess, 'Machine Learning is ',sample_config, 0)
                 print("**********************************************")
-            if epoch == config.num_epochs:
-                print("Final trained W is:\n", W)
 
- 
+
 
 def sample(config):
     with tf.Session() as sess:
         model = create_model(sess, config, False)
-        config.batch_size = 1
-        config.seq_size = 1
-        config.len_vocab = 65
-        model.sample(sess, '\n', config,0)
-        
- 
+        # config.batch_size = 1
+        # config.seq_size = 1
+        # config.len_vocab = 65
+        model.sample(sess, 'Machine Learning is ', config,0)
 
 if __name__ == "__main__":
-    print("open data file")
+    '''
+    Main function to call training and sample routines.
+    Be default we train on the gpu and sample using the cpu.
+    I haven't tested this on a cpu only computer.
+    '''
     config = hyperparameters()
 
     if config.train:
@@ -318,7 +341,6 @@ if __name__ == "__main__":
         train(config,train_set,valid_set)
     else:
         with tf.device('/cpu:0'):
-
             with open(config.vocab_file, 'rb') as pkl_file:
                 vocab,char_to_idx,idx_to_char = pickle.load(pkl_file)
             config.batch_size = 1
