@@ -14,5 +14,5 @@ The model must be trained first so that there is a checkpoint to load.
 
 TODO:
  - Add command line flags for sampling, temperature etc.
- - package model for integration into AltaML website.
+ - better Readme
  
